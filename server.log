@@ -1,0 +1,6 @@
+◇ injected env (7) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+Connected to MongoDB.
+Server running on port 3000
+CallMeBot API key not set yet — skipping WhatsApp notification.
+Email notification failed: You can only send testing emails to your own email address (testimonygboroye.dev@gmail.com). To send emails to other recipients, please verify a domain at resend.com/domains, and change the `from` address to an email using this domain.
+Email to gboroyetestimony@gmail.com failed: You can only send testing emails to your own email address (testimonygboroye.dev@gmail.com). To send emails to other recipients, please verify a domain at resend.com/domains, and change the `from` address to an email using this domain.
