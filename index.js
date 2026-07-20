@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const contactRoutes = require('./routes/contact');
 const reviewRoutes = require('./routes/reviews');
+const authRoutes = require('./routes/auth');
 
 const app = express();
 
@@ -11,6 +12,8 @@ const allowedOrigins = [
   process.env.ALLOWED_ORIGIN,
   'http://localhost:4321',
 ];
+
+app.set('trust proxy', 1);
 
 app.use(cors({
   origin: function (origin, callback) {
@@ -29,6 +32,7 @@ app.get('/', (req, res) => {
 
 app.use('/api', contactRoutes);
 app.use('/api', reviewRoutes);
+app.use('/api', authRoutes);
 
 mongoose
   .connect(process.env.MONGODB_URI)
