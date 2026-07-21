@@ -6,6 +6,7 @@ const contactRoutes = require('./routes/contact');
 const reviewRoutes = require('./routes/reviews');
 const authRoutes = require('./routes/auth');
 const totpRoutes = require('./routes/totp');
+const userRoutes = require('./routes/users');
 
 const app = express();
 
@@ -35,6 +36,7 @@ app.use('/api', contactRoutes);
 app.use('/api', reviewRoutes);
 app.use('/api', authRoutes);
 app.use('/api', totpRoutes);
+app.use('/api', userRoutes);
 
 mongoose
   .connect(process.env.MONGODB_URI)

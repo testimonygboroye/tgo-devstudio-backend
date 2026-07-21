@@ -1,21 +1,26 @@
-const { Resend } = require('resend');
+const nodemailer = require('nodemailer');
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const transporter = nodemailer.createTransport({
+  service: 'gmail',
+  auth: {
+    user: process.env.GMAIL_USER,
+    pass: process.env.GMAIL_APP_PASSWORD,
+  },
+});
 
 async function sendEmail({ to, subject, html }) {
-  const { data, error } = await resend.emails.send({
-    from: 'TGO DevStudio <onboarding@resend.dev>',
-    to,
-    subject,
-    html,
-  });
-
-  if (error) {
-    console.error('Email notification failed:', error.message || error);
-    return { channel: 'email', success: false, error: error.message || String(error) };
+  try {
+    await transporter.sendMail({
+      from: `TGO DevStudio <${process.env.GMAIL_USER}>`,
+      to,
+      subject,
+      html,
+    });
+    return { channel: 'email', success: true };
+  } catch (err) {
+    console.error('Email notification failed:', err.message);
+    return { channel: 'email', success: false, error: err.message };
   }
-
-  return { channel: 'email', success: true, id: data.id };
 }
 
 async function sendWhatsApp({ phone, text }) {

@@ -156,8 +156,6 @@ router.get('/auth/me', verifyToken, async (req, res) => {
   });
 });
 
-// Request a password reset — always responds the same way whether or not
-// the email exists, so this endpoint can't be used to discover valid accounts.
 router.post('/auth/forgot-password', resetLimiter, async (req, res) => {
   try {
     const { email } = req.body;
@@ -243,6 +241,52 @@ router.post('/auth/reset-password', resetLimiter, async (req, res) => {
     res.status(200).json({ success: true, message: 'Password reset successfully.' });
   } catch (err) {
     console.error('Reset password failed:', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+router.post('/auth/accept-invite', async (req, res) => {
+  try {
+    const { email, token, password } = req.body;
+
+    if (!email || !token || !password) {
+      return res.status(400).json({ error: 'Missing required fields.' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    }
+
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+    const user = await User.findOne({
+      email: email.toLowerCase().trim(),
+      inviteToken: hashedToken,
+      inviteTokenExpires: { $gt: Date.now() },
+      status: 'pending_invite',
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid or expired invite link.' });
+    }
+
+    user.passwordHash = await bcrypt.hash(password, 12);
+    user.status = 'active';
+    user.emailVerified = true;
+    user.inviteToken = undefined;
+    user.inviteTokenExpires = undefined;
+    await user.save();
+
+    await logAction({
+      action: 'invite_accepted',
+      actor: user,
+      target: user,
+      ipAddress: req.ip,
+    });
+
+    res.status(200).json({ success: true, message: 'Account activated. You can now log in.' });
+  } catch (err) {
+    console.error('Accept invite failed:', err.message);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 });
