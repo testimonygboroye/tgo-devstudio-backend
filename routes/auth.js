@@ -2,7 +2,7 @@ const express = require('express');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
-const { authenticator } = require('otplib');
+const { verify } = require('otplib');
 const User = require('../models/User');
 const { logAction } = require('../services/auditLog');
 const { verifyToken } = require('../middleware/auth');
@@ -87,7 +87,8 @@ router.post('/auth/login', loginLimiter, async (req, res) => {
       if (!totpCode) {
         return res.status(200).json({ requiresTotp: true });
       }
-      const validTotp = authenticator.check(totpCode, user.totpSecret);
+      const totpResult = await verify({ secret: user.totpSecret, token: totpCode });
+      const validTotp = totpResult.valid;
       if (!validTotp) {
         await logAction({
           action: 'login_failed',
