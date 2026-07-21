@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const bcrypt = require('bcryptjs');
 const User = require('../models/User');
 const { verifyToken, requirePermission } = require('../middleware/auth');
 const { logAction } = require('../services/auditLog');
@@ -18,12 +19,10 @@ router.post('/users/invite', verifyToken, requirePermission(permissions.INVITE_U
     if (!name || !email || !role) {
       return res.status(400).json({ error: 'Name, email, and role are required.' });
     }
-
     if (!(role in ROLE_RANK)) {
       return res.status(400).json({ error: 'Invalid role.' });
     }
-
-    if (!canManage(req.user.role, role)) {
+    if (req.user.role !== 'founder' && ROLE_RANK[req.user.role] >= ROLE_RANK[role]) {
       return res.status(403).json({ error: 'You cannot invite someone at or above your own role.' });
     }
 
@@ -32,9 +31,12 @@ router.post('/users/invite', verifyToken, requirePermission(permissions.INVITE_U
       return res.status(409).json({ error: 'An account with this email already exists.' });
     }
 
-    const safePermissions = req.user.role === 'founder'
-      ? (grantedPermissions || [])
-      : (grantedPermissions || []).filter((p) => req.user.permissions.includes(p));
+    const requested = grantedPermissions || [];
+    const safePermissions = requested.filter((p) => {
+      if (req.user.role === 'founder') return true;
+      const isFounderOnly = permissions.FOUNDER_ONLY.includes(p);
+      return req.user.permissions.includes(p) && !isFounderOnly;
+    });
 
     const rawToken = crypto.randomBytes(32).toString('hex');
     const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
@@ -45,6 +47,7 @@ router.post('/users/invite', verifyToken, requirePermission(permissions.INVITE_U
       role,
       permissions: safePermissions,
       invitedBy: req.user._id,
+      lineagePath: [...(req.user.lineagePath || []), req.user._id],
       status: 'pending_invite',
       inviteToken: hashedToken,
       inviteTokenExpires: new Date(Date.now() + INVITE_TOKEN_EXPIRY_MS),
@@ -82,7 +85,7 @@ router.get('/users', verifyToken, requirePermission(permissions.APPROVE_ACCESS),
 
     const visibleUsers = req.user.role === 'founder'
       ? users
-      : users.filter((u) => canManage(req.user.role, u.role) || u._id.equals(req.user._id));
+      : users.filter((u) => u._id.equals(req.user._id) || canManage(req.user, u));
 
     res.status(200).json(visibleUsers);
   } catch (err) {
@@ -91,68 +94,73 @@ router.get('/users', verifyToken, requirePermission(permissions.APPROVE_ACCESS),
   }
 });
 
-// Shared handler for block / unblock / ban / unban
-async function changeStatus(req, res, newStatus, actionName) {
+router.post('/users/:id/block', verifyToken, requirePermission(permissions.BLOCK_USERS), async (req, res) => {
   try {
     const target = await User.findById(req.params.id);
-    if (!target) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
+    if (!target) return res.status(404).json({ error: 'User not found.' });
+    if (target.founderLock) return res.status(403).json({ error: 'This account is locked by the founder and cannot be modified.' });
+    if (!canManage(req.user, target)) return res.status(403).json({ error: 'You do not have authority over this account.' });
+    if (target.status === 'blocked') return res.status(400).json({ error: 'This account is already blocked.' });
 
-    if (target._id.equals(req.user._id)) {
-      return res.status(400).json({ error: 'You cannot perform this action on your own account.' });
-    }
-
-    if (target.founderLock) {
-      return res.status(403).json({
-        error: 'This account is locked by the founder and cannot be modified.',
-      });
-    }
-
-    if (!canManage(req.user.role, target.role)) {
-      return res.status(403).json({ error: 'You do not have authority over this account.' });
-    }
-
-    target.status = newStatus;
+    target.preBlockStatus = target.status;
+    target.status = 'blocked';
     await target.save();
 
+    await logAction({ action: 'user_blocked', actor: req.user, target, ipAddress: req.ip });
+    res.status(200).json({ success: true, status: target.status });
+  } catch (err) {
+    console.error('Block failed:', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+router.post('/users/:id/unblock', verifyToken, requirePermission(permissions.BLOCK_USERS), async (req, res) => {
+  try {
+    const target = await User.findById(req.params.id);
+    if (!target) return res.status(404).json({ error: 'User not found.' });
+    if (target.founderLock) return res.status(403).json({ error: 'This account is locked by the founder and cannot be modified.' });
+    if (!canManage(req.user, target)) return res.status(403).json({ error: 'You do not have authority over this account.' });
+
+    target.status = target.preBlockStatus || 'active';
+    target.preBlockStatus = undefined;
+    await target.save();
+
+    await logAction({ action: 'user_unblocked', actor: req.user, target, ipAddress: req.ip });
+    res.status(200).json({ success: true, status: target.status });
+  } catch (err) {
+    console.error('Unblock failed:', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+router.delete('/users/:id', verifyToken, requirePermission(permissions.DELETE_USERS), async (req, res) => {
+  try {
+    const target = await User.findById(req.params.id);
+    if (!target) return res.status(404).json({ error: 'User not found.' });
+    if (target.founderLock) return res.status(403).json({ error: 'This account is locked by the founder and cannot be modified.' });
+    if (!canManage(req.user, target)) return res.status(403).json({ error: 'You do not have authority over this account.' });
+
     await logAction({
-      action: actionName,
+      action: 'user_deleted',
       actor: req.user,
       target,
+      details: `Permanently deleted ${target.email}.`,
       ipAddress: req.ip,
     });
 
-    res.status(200).json({ success: true, status: target.status });
+    await User.deleteOne({ _id: target._id });
+    res.status(200).json({ success: true });
   } catch (err) {
-    console.error(`${actionName} failed:`, err.message);
+    console.error('Delete failed:', err.message);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
-}
+});
 
-router.post('/users/:id/block', verifyToken, requirePermission(permissions.BLOCK_USERS), (req, res) =>
-  changeStatus(req, res, 'blocked', 'user_blocked'));
-
-router.post('/users/:id/unblock', verifyToken, requirePermission(permissions.BLOCK_USERS), (req, res) =>
-  changeStatus(req, res, 'active', 'user_unblocked'));
-
-router.post('/users/:id/ban', verifyToken, requirePermission(permissions.BLOCK_USERS), (req, res) =>
-  changeStatus(req, res, 'banned', 'user_banned'));
-
-router.post('/users/:id/unban', verifyToken, requirePermission(permissions.BLOCK_USERS), (req, res) =>
-  changeStatus(req, res, 'active', 'user_unbanned'));
-
-// Founder-only immutable lock/unlock — nothing else in the system can override this
 router.post('/users/:id/founder-lock', verifyToken, async (req, res) => {
   try {
-    if (req.user.role !== 'founder') {
-      return res.status(403).json({ error: 'Only the founder can set this lock.' });
-    }
-
+    if (req.user.role !== 'founder') return res.status(403).json({ error: 'Only the founder can set this lock.' });
     const target = await User.findById(req.params.id);
-    if (!target) {
-      return res.status(404).json({ error: 'User not found.' });
-    }
+    if (!target) return res.status(404).json({ error: 'User not found.' });
 
     const { locked, reason } = req.body;
     target.founderLock = !!locked;
@@ -170,6 +178,113 @@ router.post('/users/:id/founder-lock', verifyToken, async (req, res) => {
     res.status(200).json({ success: true, founderLock: target.founderLock });
   } catch (err) {
     console.error('Founder lock action failed:', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+// Propose a role change — does NOT apply immediately. The target must confirm it themselves.
+router.patch('/users/:id/role', verifyToken, requirePermission(permissions.MANAGE_ROLES), async (req, res) => {
+  try {
+    const target = await User.findById(req.params.id);
+    if (!target) return res.status(404).json({ error: 'User not found.' });
+
+    const { role } = req.body;
+    if (!(role in ROLE_RANK)) return res.status(400).json({ error: 'Invalid role.' });
+    if (target.founderLock) return res.status(403).json({ error: 'This account is locked by the founder and cannot be modified.' });
+    if (req.user.role !== 'founder' && !canManage(req.user, target)) {
+      return res.status(403).json({ error: 'You do not have authority over this account.' });
+    }
+    if (target.status !== 'active') {
+      return res.status(400).json({ error: 'Role changes can only be proposed for active accounts.' });
+    }
+
+    target.pendingRole = role;
+    target.pendingRoleRequestedBy = req.user._id;
+    target.pendingRoleRequestedAt = new Date();
+    await target.save();
+
+    await notify({
+      recipient: { email: target.email },
+      channels: ['email'],
+      subject: 'Role change requires your confirmation — TGO DevStudio',
+      html: `<p>Hi ${target.name},</p><p>${req.user.name} has proposed changing your role from <strong>${target.role.replace('_', ' ')}</strong> to <strong>${role.replace('_', ' ')}</strong>.</p><p>Log in to your account to confirm or decline this change. It will not take effect until you confirm it.</p>`,
+    });
+
+    await logAction({
+      action: 'role_change_proposed',
+      actor: req.user,
+      target,
+      details: `${target.role} -> ${role}`,
+      ipAddress: req.ip,
+    });
+
+    res.status(200).json({ success: true, pendingRole: target.pendingRole });
+  } catch (err) {
+    console.error('Role change proposal failed:', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+// Only the target themselves can confirm — requires re-entering their password.
+router.post('/users/:id/confirm-role-change', verifyToken, async (req, res) => {
+  try {
+    if (!req.user._id.equals(req.params.id)) {
+      return res.status(403).json({ error: 'Only you can confirm your own role change.' });
+    }
+    if (!req.user.pendingRole) {
+      return res.status(400).json({ error: 'No pending role change to confirm.' });
+    }
+
+    const { password } = req.body;
+    if (!password) return res.status(400).json({ error: 'Password is required to confirm.' });
+
+    const passwordMatches = await bcrypt.compare(password, req.user.passwordHash);
+    if (!passwordMatches) return res.status(401).json({ error: 'Incorrect password.' });
+
+    const previousRole = req.user.role;
+    const newRole = req.user.pendingRole;
+    req.user.role = newRole;
+    req.user.pendingRole = null;
+    req.user.pendingRoleRequestedBy = null;
+    req.user.pendingRoleRequestedAt = undefined;
+    await req.user.save();
+
+    await logAction({
+      action: 'role_change_confirmed',
+      actor: req.user,
+      target: req.user,
+      details: `${previousRole} -> ${newRole}`,
+      ipAddress: req.ip,
+    });
+
+    res.status(200).json({ success: true, role: req.user.role });
+  } catch (err) {
+    console.error('Role change confirmation failed:', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+router.post('/users/:id/reject-role-change', verifyToken, async (req, res) => {
+  try {
+    if (!req.user._id.equals(req.params.id)) {
+      return res.status(403).json({ error: 'Only you can reject your own role change.' });
+    }
+
+    req.user.pendingRole = null;
+    req.user.pendingRoleRequestedBy = null;
+    req.user.pendingRoleRequestedAt = undefined;
+    await req.user.save();
+
+    await logAction({
+      action: 'role_change_rejected',
+      actor: req.user,
+      target: req.user,
+      ipAddress: req.ip,
+    });
+
+    res.status(200).json({ success: true });
+  } catch (err) {
+    console.error('Role change rejection failed:', err.message);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 });

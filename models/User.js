@@ -11,44 +11,61 @@ const userSchema = new mongoose.Schema({
     required: true,
   },
 
-  // Granular, grantable permissions — the real access-control layer.
-  // Role above is a display/grouping label; this array is what's actually checked.
+  // A role change proposed by a manager, awaiting the target's own confirmation.
+  pendingRole: { type: String, enum: ['founder', 'super_admin', 'admin', 'team_lead', 'collaborator'], default: null },
+  pendingRoleRequestedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+  pendingRoleRequestedAt: { type: Date },
+
   permissions: {
     type: [String],
     default: [],
   },
 
-  // Invite chain — who brought this person in, for full traceability
   invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+
+  lineagePath: {
+    type: [mongoose.Schema.Types.ObjectId],
+    default: [],
+  },
+
+  managementScope: {
+    depth: { type: Number, default: null },
+  },
+
+  additionalManaged: [{
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    includeSubtree: { type: Boolean, default: true },
+  }],
+
+  deniedManaged: {
+    type: [mongoose.Schema.Types.ObjectId],
+    default: [],
+  },
 
   status: {
     type: String,
-    enum: ['pending_invite', 'pending_verification', 'active', 'blocked', 'banned'],
+    enum: ['pending_invite', 'pending_verification', 'active', 'blocked'],
     default: 'pending_invite',
   },
 
-  // Founder-only immutable override — nothing below the founder can change this
+  preBlockStatus: { type: String },
+
   founderLock: { type: Boolean, default: false },
   founderLockReason: { type: String, default: null },
 
-  // Email verification
   emailVerified: { type: Boolean, default: false },
   emailVerificationToken: { type: String },
   emailVerificationExpires: { type: Date },
 
-  // Invite acceptance (pending accounts use this to set their own password)
   inviteToken: { type: String },
   inviteTokenExpires: { type: Date },
 
-  // Password reset
   passwordResetToken: { type: String },
   passwordResetExpires: { type: Date },
 
-  // TOTP two-factor authentication
   totpSecret: { type: String },
   totpEnabled: { type: Boolean, default: false },
 
-  // Brute-force protection
   failedLoginAttempts: { type: Number, default: 0 },
   lockUntil: { type: Date },
 
