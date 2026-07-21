@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
@@ -6,16 +7,26 @@ const { verify } = require('otplib');
 const User = require('../models/User');
 const { logAction } = require('../services/auditLog');
 const { verifyToken } = require('../middleware/auth');
+const { notify } = require('../services/notify');
 
 const router = express.Router();
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCK_DURATION_MS = 15 * 60 * 1000;
+const RESET_TOKEN_EXPIRY_MS = 60 * 60 * 1000;
 
 const loginLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 10,
   message: { error: 'Too many login attempts. Please try again later.' },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+const resetLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: 'Too many requests. Please try again later.' },
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -88,8 +99,7 @@ router.post('/auth/login', loginLimiter, async (req, res) => {
         return res.status(200).json({ requiresTotp: true });
       }
       const totpResult = await verify({ secret: user.totpSecret, token: totpCode });
-      const validTotp = totpResult.valid;
-      if (!validTotp) {
+      if (!totpResult.valid) {
         await logAction({
           action: 'login_failed',
           actor: user,
@@ -144,6 +154,97 @@ router.get('/auth/me', verifyToken, async (req, res) => {
     permissions: req.user.permissions,
     totpEnabled: req.user.totpEnabled,
   });
+});
+
+// Request a password reset — always responds the same way whether or not
+// the email exists, so this endpoint can't be used to discover valid accounts.
+router.post('/auth/forgot-password', resetLimiter, async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ error: 'Email is required.' });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase().trim() });
+
+    if (user && user.status !== 'blocked' && user.status !== 'banned') {
+      const rawToken = crypto.randomBytes(32).toString('hex');
+      const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
+
+      user.passwordResetToken = hashedToken;
+      user.passwordResetExpires = new Date(Date.now() + RESET_TOKEN_EXPIRY_MS);
+      await user.save();
+
+      const resetUrl = `${process.env.FRONTEND_URL}/admin/reset-password?token=${rawToken}&email=${encodeURIComponent(user.email)}`;
+
+      await notify({
+        recipient: { email: user.email },
+        channels: ['email'],
+        subject: 'Reset your TGO DevStudio password',
+        html: `<p>Hi ${user.name},</p><p>We received a request to reset your password. This link expires in 1 hour:</p><p><a href="${resetUrl}">${resetUrl}</a></p><p>If you didn't request this, you can safely ignore this email.</p>`,
+      });
+
+      await logAction({
+        action: 'password_reset_requested',
+        actor: user,
+        target: user,
+        ipAddress: req.ip,
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      message: 'If an account exists with that email, a reset link has been sent.',
+    });
+  } catch (err) {
+    console.error('Forgot password failed:', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
+});
+
+router.post('/auth/reset-password', resetLimiter, async (req, res) => {
+  try {
+    const { email, token, newPassword } = req.body;
+
+    if (!email || !token || !newPassword) {
+      return res.status(400).json({ error: 'Missing required fields.' });
+    }
+
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters.' });
+    }
+
+    const hashedToken = crypto.createHash('sha256').update(token).digest('hex');
+
+    const user = await User.findOne({
+      email: email.toLowerCase().trim(),
+      passwordResetToken: hashedToken,
+      passwordResetExpires: { $gt: Date.now() },
+    });
+
+    if (!user) {
+      return res.status(400).json({ error: 'Invalid or expired reset link.' });
+    }
+
+    user.passwordHash = await bcrypt.hash(newPassword, 12);
+    user.passwordResetToken = undefined;
+    user.passwordResetExpires = undefined;
+    user.failedLoginAttempts = 0;
+    user.lockUntil = undefined;
+    await user.save();
+
+    await logAction({
+      action: 'password_reset_completed',
+      actor: user,
+      target: user,
+      ipAddress: req.ip,
+    });
+
+    res.status(200).json({ success: true, message: 'Password reset successfully.' });
+  } catch (err) {
+    console.error('Reset password failed:', err.message);
+    res.status(500).json({ error: 'Something went wrong. Please try again.' });
+  }
 });
 
 module.exports = router;
