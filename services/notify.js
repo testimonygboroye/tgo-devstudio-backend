@@ -1,7 +1,10 @@
 const nodemailer = require('nodemailer');
 
 const transporter = nodemailer.createTransport({
-  service: 'gmail',
+  host: 'smtp.gmail.com',
+  port: 465,
+  secure: true,
+  family: 4,
   auth: {
     user: process.env.GMAIL_USER,
     pass: process.env.GMAIL_APP_PASSWORD,
@@ -42,12 +45,6 @@ async function sendWhatsApp({ phone, text }) {
   }
 }
 
-/**
- * Generic notification dispatcher.
- * Today this only routes to the founder (via env vars).
- * Once Phase 3 (accounts/roles) exists, `recipient` can carry per-user
- * channel preferences instead of always reading from env vars.
- */
 async function notify({ recipient, channels, subject, text, html }) {
   const results = [];
 
