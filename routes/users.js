@@ -182,7 +182,8 @@ router.post('/users/:id/founder-lock', verifyToken, async (req, res) => {
   }
 });
 
-// Propose a role change — does NOT apply immediately. The target must confirm it themselves.
+// Demotions apply immediately (reducing power needs no confirmation).
+// Promotions require the target's own confirmation before taking effect.
 router.patch('/users/:id/role', verifyToken, requirePermission(permissions.MANAGE_ROLES), async (req, res) => {
   try {
     const target = await User.findById(req.params.id);
@@ -195,7 +196,38 @@ router.patch('/users/:id/role', verifyToken, requirePermission(permissions.MANAG
       return res.status(403).json({ error: 'You do not have authority over this account.' });
     }
     if (target.status !== 'active') {
-      return res.status(400).json({ error: 'Role changes can only be proposed for active accounts.' });
+      return res.status(400).json({ error: 'Role changes can only be made for active accounts.' });
+    }
+    if (role === target.role) {
+      return res.status(400).json({ error: 'That is already their current role.' });
+    }
+
+    const isDemotion = ROLE_RANK[role] > ROLE_RANK[target.role];
+
+    if (isDemotion) {
+      const previousRole = target.role;
+      target.role = role;
+      target.pendingRole = null;
+      target.pendingRoleRequestedBy = null;
+      target.pendingRoleRequestedAt = undefined;
+      await target.save();
+
+      await notify({
+        recipient: { email: target.email },
+        channels: ['email'],
+        subject: 'Your role has changed at TGO DevStudio',
+        html: `<p>Hi ${target.name},</p><p>${req.user.name} has changed your role from <strong>${previousRole.replace('_', ' ')}</strong> to <strong>${role.replace('_', ' ')}</strong>.</p>`,
+      });
+
+      await logAction({
+        action: 'role_demoted',
+        actor: req.user,
+        target,
+        details: `${previousRole} -> ${role}`,
+        ipAddress: req.ip,
+      });
+
+      return res.status(200).json({ success: true, role: target.role, immediate: true });
     }
 
     target.pendingRole = role;
@@ -206,7 +238,7 @@ router.patch('/users/:id/role', verifyToken, requirePermission(permissions.MANAG
     await notify({
       recipient: { email: target.email },
       channels: ['email'],
-      subject: 'Role change requires your confirmation — TGO DevStudio',
+      subject: 'Role change requires your confirmation at TGO DevStudio',
       html: `<p>Hi ${target.name},</p><p>${req.user.name} has proposed changing your role from <strong>${target.role.replace('_', ' ')}</strong> to <strong>${role.replace('_', ' ')}</strong>.</p><p>Log in to your account to confirm or decline this change. It will not take effect until you confirm it.</p>`,
     });
 
@@ -218,14 +250,13 @@ router.patch('/users/:id/role', verifyToken, requirePermission(permissions.MANAG
       ipAddress: req.ip,
     });
 
-    res.status(200).json({ success: true, pendingRole: target.pendingRole });
+    res.status(200).json({ success: true, pendingRole: target.pendingRole, immediate: false });
   } catch (err) {
-    console.error('Role change proposal failed:', err.message);
+    console.error('Role change failed:', err.message);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
   }
 });
 
-// Only the target themselves can confirm — requires re-entering their password.
 router.post('/users/:id/confirm-role-change', verifyToken, async (req, res) => {
   try {
     if (!req.user._id.equals(req.params.id)) {
