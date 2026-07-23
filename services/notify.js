@@ -1,24 +1,25 @@
-const nodemailer = require('nodemailer');
-
-const transporter = nodemailer.createTransport({
-  host: 'smtp.gmail.com',
-  port: 465,
-  secure: true,
-  family: 4,
-  auth: {
-    user: process.env.GMAIL_USER,
-    pass: process.env.GMAIL_APP_PASSWORD,
-  },
-});
-
 async function sendEmail({ to, subject, html }) {
   try {
-    await transporter.sendMail({
-      from: `TGO DevStudio <${process.env.GMAIL_USER}>`,
-      to,
-      subject,
-      html,
+    const res = await fetch('https://api.brevo.com/v3/smtp/email', {
+      method: 'POST',
+      headers: {
+        'api-key': process.env.BREVO_API_KEY,
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        sender: { name: 'TGO DevStudio', email: process.env.GMAIL_USER },
+        to: [{ email: to }],
+        subject,
+        htmlContent: html,
+      }),
     });
+
+    if (!res.ok) {
+      const errorBody = await res.text();
+      throw new Error(`Brevo responded with ${res.status}: ${errorBody}`);
+    }
+
     return { channel: 'email', success: true };
   } catch (err) {
     console.error('Email notification failed:', err.message);
